@@ -18,7 +18,8 @@ class Measurement:
             'Cross Entropy': CERecorder,
             'Accuracy': AccuracyRecorder,
             'Cross Entropy Sharpness': CESharpnessRecorder,
-            "Cross Entropy Sharpness V2": CESharpnessRecorderV2
+            "MSE Sharpness": MSESharpnessRecorder,
+            "Hessian Second Order Term Norm": MSESecondOrderTermNorm
         }
     
     def measure(self, train_data, test_data, model, epoch_idx):
@@ -116,7 +117,7 @@ class MSERecorder(Recorder):
 
 
 class CERecorder(Recorder):
-    
+
     def __init__(self, physical_batch_size, verbose=False):
         super(CERecorder, self).__init__(physical_batch_size, verbose=verbose)
         self.loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
@@ -165,50 +166,87 @@ class CESharpnessRecorder(Recorder):
     def get_name(self):
         return "Cross Entropy Sharpness"
     
-class CESharpnessRecorderV2(Recorder):
-    
-    def __init__(self, physical_batch_size, verbose=False):
-        super(CESharpnessRecorderV2, self).__init__(physical_batch_size, verbose=verbose)
-        self.loss_fn = torch.nn.CrossEntropyLoss(reduction='mean')
+
+class MSESharpnessRecorder(Recorder):
         
+    def __init__(self, physical_batch_size, verbose=False):
+        super(CESharpnessRecorder, self).__init__(physical_batch_size, verbose=verbose)
+        self.loss_fn = torch.nn.MSELoss(reduction='mean')
+    
     def compute(self, data, model):
-        return get_hessian_eigenvalues(model, self.loss_fn, data, neigs=1)[0]
+        X, Y = data
+        hessian_comp = hessian(model, self.loss_fn, data=(X, Y), cuda=True)
+        eig_val = hessian_comp.eigenvalues(top_n=1)[0][0]
+        return eig_val
     
     def get_name(self):
-        return "Cross Entropy Sharpness V2"
+        return "MSE Sharpness"
     
-def compute_hvp(model, loss_fn, dataset, vector):
     
-    p = len(parameters_to_vector(model.parameters()))
-    X, Y = dataset
-    hvp = torch.zeros(p, dtype=torch.float, device='cuda')
-    vector = vector.cuda()
-    loss = loss_fn(model(X.cuda()), Y.cuda())
-    grads = torch.autograd.grad(loss, inputs=model.parameters(), create_graph=True)
-    dot = parameters_to_vector(grads).mul(vector).sum()
-    grads = [g.contiguous() for g in torch.autograd.grad(dot, model.parameters(), retain_graph=True)]
-    hvp += parameters_to_vector(grads)
-    return hvp
+class MSESecondOrderTermNorm(Recorder):
+    
+    def __init__(self, verbose=False):
+        super(MSESecondOrderTermNorm, self).__init__(1, verbose=verbose)
+        
+        
+    def compute(self, data, model, maxIter=100, tol=1e-3):
+        model.eval().zero_grad()
+        params = params_with_grad(model)
+        D = compute_D(data, model, params)
+        eigenvalue = None
+        v = [torch.randn(p.size()).to('cuda') for p in self.params]  # generate random vector
+        v = normalization(v)  # normalize the vector
+
+        for i in range(maxIter):
+            # v = orthnormal(v, eigenvectors)
+            model.zero_grad()
+            Hv = h_hat_v(D, v, params)
+            tmp_eigenvalue = group_product(Hv, v).cpu().item()
+
+            v = normalization(Hv)
+
+            if eigenvalue == None:
+                eigenvalue = tmp_eigenvalue
+            else:
+                if abs(eigenvalue - tmp_eigenvalue) / (abs(eigenvalue) +
+                                                        1e-6) < tol:
+                    break
+                else:
+                    eigenvalue = tmp_eigenvalue
+        model.train()
+        return eigenvalue
+    
+    def get_name(self):
+        return "Hessian Second Order Term Norm"
+    
+    
+
+def params_with_grad(model):
+    return [p for p in model.parameters() if p.requires_grad]
 
 
-def lanczos(matrix_vector, dim: int, neigs: int):
-    """ Invoke the Lanczos algorithm to compute the leading eigenvalues and eigenvectors of a matrix / linear operator
-    (which we can access via matrix-vector products). """
-
-    def mv(vec: np.ndarray):
-        gpu_vec = torch.tensor(vec, dtype=torch.float).cuda()
-        return matrix_vector(gpu_vec)
-
-    operator = LinearOperator((dim, dim), matvec=mv)
-    evals, evecs = eigsh(operator, neigs)
-    return torch.from_numpy(np.ascontiguousarray(evals[::-1]).copy()).float(), \
-        torch.from_numpy(np.ascontiguousarray(np.flip(evecs, -1)).copy()).float()
+def compute_D(data, model, params):
+    X, Y = data
+    model_output = model(X)
+    dloss = (model_output - Y).detach()
+    return torch.autograd.grad(model_output, params, grad_outputs=dloss, retain_graph=True)
 
 
-def get_hessian_eigenvalues(model, loss_fn, dataset, neigs=6):
-    """ Compute the leading Hessian eigenvalues. """
-    hvp_delta = lambda delta: compute_hvp(model, loss_fn, dataset,
-                                        delta).detach().cpu()
-    nparams = len(parameters_to_vector((model.parameters())))
-    evals, evecs = lanczos(hvp_delta, nparams, neigs=neigs)
-    return evals
+def h_hat_v(D, v, params):
+    return torch.autograd.grad(D, params, grad_outputs=v, retain_graph=True)
+
+
+def group_product(xs, ys):
+    return sum([torch.sum(x * y) for (x, y) in zip(xs, ys)])
+
+
+def normalization(v):
+    """
+    normalization of a list of vectors
+    return: normalized vectors v
+    """
+    s = group_product(v, v)
+    s = s**0.5
+    s = s.cpu().item()
+    v = [vi / (s + 1e-6) for vi in v]
+    return v
