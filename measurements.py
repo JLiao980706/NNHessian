@@ -17,9 +17,11 @@ class Measurement:
             'MSE': MSERecorder,
             'Cross Entropy': CERecorder,
             'Accuracy': AccuracyRecorder,
+            'Binary Accuracy': BinaryAccuracyRecorder,
+            'Binary Cross Entropy': BCELossRecorder,
             'Cross Entropy Sharpness': CESharpnessRecorder,
-            "MSE Sharpness": MSESharpnessRecorder,
-            "Hessian Second Order Term Norm": MSESecondOrderTermNorm
+            'MSE Sharpness': MSESharpnessRecorder,
+            'Hessian Second Order Term Norm': MSESecondOrderTermNorm
         }
     
     def measure(self, train_data, test_data, model, epoch_idx):
@@ -151,6 +153,44 @@ class AccuracyRecorder(Recorder):
         return "Accuracy"
     
 
+class BinaryAccuracyRecorder(Recorder):
+    
+    def __init__(self, physical_batch_size, verbose=False):
+        super(BinaryAccuracyRecorder, self).__init__(physical_batch_size, verbose=verbose)
+        self.sig_layer = torch.nn.Sigmoid()
+    
+    def compute(self, data, model):
+        data_batches = self.batching(data)
+        error = 0.
+        for X, Y in data_batches:
+            prob_output = self.sig_layer(model(X.cuda())).detach().cpu().numpy()
+            error += ((prob_output > 0.5).astype(np.float32) == Y.numpy()).astype(np.float32).sum()
+        error /= data[0].size(dim=0)
+        return error
+    
+    def get_name(self):
+        return "Binary Accuracy"
+    
+
+class BCELossRecorder(Recorder):
+    
+    def __init__(self, physical_batch_size, verbose=False):
+        super(BCELossRecorder, self).__init__(physical_batch_size, verbose=verbose)
+        self.sig_layer = torch.nn.Sigmoid()
+        self.loss_fn = torch.nn.BCELoss(reduction='sum')
+    
+    def compute(self, data, model):
+        data_batches = self.batching(data)
+        error = 0.
+        for X, Y in data_batches:
+            error += self.loss_fn(self.sig_layer(model(X.cuda())), Y.cuda())
+        error /= data[0].size(dim=0)
+        return error.detach().cpu().item()
+    
+    def get_name(self):
+        return "Binary Cross Entropy"
+    
+
 class CESharpnessRecorder(Recorder):
         
     def __init__(self, physical_batch_size, verbose=False):
@@ -170,7 +210,7 @@ class CESharpnessRecorder(Recorder):
 class MSESharpnessRecorder(Recorder):
         
     def __init__(self, physical_batch_size, verbose=False):
-        super(CESharpnessRecorder, self).__init__(physical_batch_size, verbose=verbose)
+        super(MSESharpnessRecorder, self).__init__(physical_batch_size, verbose=verbose)
         self.loss_fn = torch.nn.MSELoss(reduction='mean')
     
     def compute(self, data, model):
@@ -185,7 +225,7 @@ class MSESharpnessRecorder(Recorder):
     
 class MSESecondOrderTermNorm(Recorder):
     
-    def __init__(self, verbose=False):
+    def __init__(self, physical_batch_size,  verbose=False):
         super(MSESecondOrderTermNorm, self).__init__(1, verbose=verbose)
         
         
@@ -194,7 +234,7 @@ class MSESecondOrderTermNorm(Recorder):
         params = params_with_grad(model)
         D = compute_D(data, model, params)
         eigenvalue = None
-        v = [torch.randn(p.size()).to('cuda') for p in self.params]  # generate random vector
+        v = [torch.randn(p.size()).to('cuda') for p in params]  # generate random vector
         v = normalization(v)  # normalize the vector
 
         for i in range(maxIter):
@@ -227,9 +267,9 @@ def params_with_grad(model):
 
 def compute_D(data, model, params):
     X, Y = data
-    model_output = model(X)
-    dloss = (model_output - Y).detach()
-    return torch.autograd.grad(model_output, params, grad_outputs=dloss, retain_graph=True)
+    model_output = model(X.cuda())
+    dloss = torch.flatten(model_output - Y.cuda()).detach() / X.shape[0]
+    return torch.autograd.grad(torch.flatten(model_output), params, grad_outputs=dloss, retain_graph=True, create_graph=True)
 
 
 def h_hat_v(D, v, params):

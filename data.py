@@ -91,6 +91,29 @@ def load_mnist(num_per_class=0, flatten=False, test=False):
         return torch.from_numpy(X.reshape(X.shape[0], -1) / 255.), torch.from_numpy(Y)
     else:
         return torch.from_numpy(X / 255.), torch.from_numpy(Y).to(torch.int64)
+    
+    
+def load_reg_mnist(flatten=False, test=False):
+    if test:
+        with open(f'./data/mnist_test.npz', 'rb') as data_file:
+            npzfile = np.load(data_file)
+            X = npzfile['X'].astype(np.float32)
+        with open(f'./data/mnist_test_reg_labels.npz', 'rb') as data_file:
+            npzfile = np.load(data_file)
+            Y = npzfile['Y'].astype(np.float32).reshape((-1, 1))
+        
+    else:
+        with open(f'./data/mnist_train_500.npz', 'rb') as data_file:
+            npzfile = np.load(data_file)
+            X = npzfile['X'].astype(np.float32)
+            
+        with open(f'./data/mnist_train_500_reg_labels.npz', 'rb') as data_file:
+            npzfile = np.load(data_file)
+            Y = npzfile['Y'].astype(np.float32).reshape((-1, 1))
+    if flatten:
+        return torch.from_numpy(X.reshape(X.shape[0], -1) / 255.), torch.from_numpy(Y)
+    else:
+        return torch.from_numpy(X / 255.), torch.from_numpy(Y)
 
 
 def load_dataset(dataset_name: str, loss: str) -> (TensorDataset, TensorDataset):

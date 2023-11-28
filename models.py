@@ -41,5 +41,5 @@ def fully_connected_net(input_dim, output_dim, widths: List[int], activation: st
             nn.Linear(prev_width, widths[l], bias=bias),
             get_activation(activation),
         ])
-    modules.append(nn.Linear(widths[-1], output_dim, bias=bias))
+    modules.append(nn.Linear(widths[-1], output_dim, bias=False))
     return nn.Sequential(*modules)
