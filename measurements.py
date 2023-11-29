@@ -19,9 +19,11 @@ class Measurement:
             'Accuracy': AccuracyRecorder,
             'Binary Accuracy': BinaryAccuracyRecorder,
             'Binary Cross Entropy': BCELossRecorder,
+            'Tangent Feature Change': TangentFeatureChangeRecorder,
             'Cross Entropy Sharpness': CESharpnessRecorder,
             'MSE Sharpness': MSESharpnessRecorder,
-            'Hessian Second Order Term Norm': MSESecondOrderTermNorm
+            'Hessian Second Order Term Norm': MSESecondOrderTermNorm,
+            'MSE Eigenvalues': MSEEigsRecorder
         }
     
     def measure(self, train_data, test_data, model, epoch_idx):
@@ -41,11 +43,11 @@ class Measurement:
     def add_test_recorder_raw(self, recorder):
         self.on_test_data.append(recorder)
     
-    def add_train_recorder(self, rec_name, phys_batch_size, verbose):
-        self.add_train_recorder_raw(self.get_recorder_constr(rec_name)(phys_batch_size, verbose))
+    def add_train_recorder(self, rec_name, phys_batch_size, every=1, verbose=False):
+        self.add_train_recorder_raw(self.get_recorder_constr(rec_name)(phys_batch_size, every, verbose))
     
-    def add_test_recorder(self, rec_name, phys_batch_size, verbose):
-        self.add_test_recorder_raw(self.get_recorder_constr(rec_name)(phys_batch_size, verbose))
+    def add_test_recorder(self, rec_name, phys_batch_size, every=1, verbose=False):
+        self.add_test_recorder_raw(self.get_recorder_constr(rec_name)(phys_batch_size, every, verbose))
         
     def get_recorder_constr(self, rec_name):
         if rec_name in self.available_recorders():
@@ -65,15 +67,17 @@ class Measurement:
         
 class Recorder:
     
-    def __init__(self, physical_batch_size, verbose=False):
+    def __init__(self, physical_batch_size, every=1, verbose=False):
         self.batch_size = physical_batch_size
         self.verbose=verbose
+        self.every = every
         self.records = []
     
     def record(self, data, model, epoch_idx, verbose):
-        self.records.append((epoch_idx, self.compute(data, model)))
-        if verbose and self.verbose:
-            print(f"    {self.get_name()}: {self.records[-1][1]}.")
+        if epoch_idx % self.every == 0:
+            self.records.append((epoch_idx, self.compute(data, model)))
+            if verbose and self.verbose:
+                print(f"    {self.get_name()}: {self.records[-1][1]}.")
         
     def batching(self, data):
         X, Y = data
@@ -102,8 +106,8 @@ class Recorder:
 
 class MSERecorder(Recorder):
     
-    def __init__(self, physical_batch_size, verbose=False):
-        super(MSERecorder, self).__init__(physical_batch_size, verbose=verbose)
+    def __init__(self, physical_batch_size, every=1, verbose=False):
+        super(MSERecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
         self.loss_fn = torch.nn.MSELoss(reduction='sum')
     
     def compute(self, data, model):
@@ -120,8 +124,8 @@ class MSERecorder(Recorder):
 
 class CERecorder(Recorder):
 
-    def __init__(self, physical_batch_size, verbose=False):
-        super(CERecorder, self).__init__(physical_batch_size, verbose=verbose)
+    def __init__(self, physical_batch_size, every=1, verbose=False):
+        super(CERecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
         self.loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
     
     def compute(self, data, model):
@@ -138,8 +142,8 @@ class CERecorder(Recorder):
 
 class AccuracyRecorder(Recorder):
     
-    def __init__(self, physical_batch_size, verbose=False):
-        super(AccuracyRecorder, self).__init__(physical_batch_size, verbose=verbose)
+    def __init__(self, physical_batch_size, every=1, verbose=False):
+        super(AccuracyRecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
     
     def compute(self, data, model):
         data_batches = self.batching(data)
@@ -155,8 +159,8 @@ class AccuracyRecorder(Recorder):
 
 class BinaryAccuracyRecorder(Recorder):
     
-    def __init__(self, physical_batch_size, verbose=False):
-        super(BinaryAccuracyRecorder, self).__init__(physical_batch_size, verbose=verbose)
+    def __init__(self, physical_batch_size, every=1, verbose=False):
+        super(BinaryAccuracyRecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
         self.sig_layer = torch.nn.Sigmoid()
     
     def compute(self, data, model):
@@ -174,8 +178,8 @@ class BinaryAccuracyRecorder(Recorder):
 
 class BCELossRecorder(Recorder):
     
-    def __init__(self, physical_batch_size, verbose=False):
-        super(BCELossRecorder, self).__init__(physical_batch_size, verbose=verbose)
+    def __init__(self, physical_batch_size, every=1, verbose=False):
+        super(BCELossRecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
         self.sig_layer = torch.nn.Sigmoid()
         self.loss_fn = torch.nn.BCELoss(reduction='sum')
     
@@ -190,11 +194,43 @@ class BCELossRecorder(Recorder):
     def get_name(self):
         return "Binary Cross Entropy"
     
+    
+class TangentFeatureChangeRecorder(Recorder):
+    
+    def __init__(self, physical_batch_size, every=1, verbose=False, use_samples=200):
+        super(TangentFeatureChangeRecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
+        self.last_tangent_feature = None
+        self.indices = np.random.choice(5000, use_samples, replace=False)
+        
+    
+    def compute(self, data, model):
+        X, _ = data
+        params = params_with_grad(model)
+        tangent_features = [np.zeros((self.indices.shape[0], torch.flatten(p).size()[0])) for p in params]
+        for comp_idx, sample_idx in enumerate(self.indices):
+            x = X[sample_idx].reshape((1, -1)).cuda()
+            model.zero_grad()
+            tfeatures = torch.autograd.grad(model(x), params)
+            for all_f, cur_f in zip(tangent_features, tfeatures):
+                all_f[comp_idx] = cur_f.detach().cpu().numpy().flatten()
+                
+        if self.last_tangent_feature is None:
+            self.last_tangent_feature = tangent_features
+            return 1
+        
+        last_feature_norm = [np.linalg.norm(a) ** 2 for a in self.last_tangent_feature]
+        all_diffs_sq = [np.linalg.norm(a - b) ** 2 for a, b in zip(self.last_tangent_feature, tangent_features)]
+        self.last_tangent_feature = tangent_features
+        return np.sqrt(np.sum(all_diffs_sq) / np.sum(last_feature_norm))
+    
+    def get_name(self):
+        return "Tangent Feature Change"
+    
 
 class CESharpnessRecorder(Recorder):
         
-    def __init__(self, physical_batch_size, verbose=False):
-        super(CESharpnessRecorder, self).__init__(physical_batch_size, verbose=verbose)
+    def __init__(self, physical_batch_size, every=1, verbose=False):
+        super(CESharpnessRecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
         self.loss_fn = torch.nn.CrossEntropyLoss(reduction='mean')
     
     def compute(self, data, model):
@@ -209,8 +245,8 @@ class CESharpnessRecorder(Recorder):
 
 class MSESharpnessRecorder(Recorder):
         
-    def __init__(self, physical_batch_size, verbose=False):
-        super(MSESharpnessRecorder, self).__init__(physical_batch_size, verbose=verbose)
+    def __init__(self, physical_batch_size, every=1, verbose=False):
+        super(MSESharpnessRecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
         self.loss_fn = torch.nn.MSELoss(reduction='mean')
     
     def compute(self, data, model):
@@ -223,10 +259,26 @@ class MSESharpnessRecorder(Recorder):
         return "MSE Sharpness"
     
     
+class MSEEigsRecorder(Recorder):
+    
+    def __init__(self, physical_batch_size, every=1, verbose=False):
+        super(MSEEigsRecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
+        self.loss_fn = torch.nn.MSELoss(reduction='mean')
+    
+    def compute(self, data, model):
+        X, Y = data
+        hessian_comp = hessian(model, self.loss_fn, data=(X, Y), cuda=True)
+        eig_vals = hessian_comp.eigenvalues(top_n=50)[0]
+        return eig_vals
+    
+    def get_name(self):
+        return "MSE Eigenvalues"
+    
+    
 class MSESecondOrderTermNorm(Recorder):
     
-    def __init__(self, physical_batch_size,  verbose=False):
-        super(MSESecondOrderTermNorm, self).__init__(1, verbose=verbose)
+    def __init__(self, physical_batch_size, every=1,  verbose=False):
+        super(MSESecondOrderTermNorm, self).__init__(physical_batch_size, every=every, verbose=verbose)
         
         
     def compute(self, data, model, maxIter=100, tol=1e-3):
