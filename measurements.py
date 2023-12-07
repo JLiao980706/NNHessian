@@ -268,8 +268,7 @@ class MSEEigsRecorder(Recorder):
     def compute(self, data, model):
         X, Y = data
         hessian_comp = hessian(model, self.loss_fn, data=(X, Y), cuda=True)
-        eig_vals = hessian_comp.eigenvalues(top_n=50)[0]
-        return eig_vals
+        return hessian_comp.eigenvalues(top_n=50)[0]
     
     def get_name(self):
         return "MSE Eigenvalues"
