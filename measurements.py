@@ -197,7 +197,7 @@ class BCELossRecorder(Recorder):
     
 class TangentFeatureChangeRecorder(Recorder):
     
-    def __init__(self, physical_batch_size, every=1, verbose=False, use_samples=200):
+    def __init__(self, physical_batch_size, every=1, verbose=False, use_samples=2500):
         super(TangentFeatureChangeRecorder, self).__init__(physical_batch_size, every=every, verbose=verbose)
         self.last_tangent_feature = None
         self.indices = np.random.choice(5000, use_samples, replace=False)
@@ -268,7 +268,7 @@ class MSEEigsRecorder(Recorder):
     def compute(self, data, model):
         X, Y = data
         hessian_comp = hessian(model, self.loss_fn, data=(X, Y), cuda=True)
-        return hessian_comp.eigenvalues(top_n=50)[0]
+        return hessian_comp.eigenvalues(top_n=50)
     
     def get_name(self):
         return "MSE Eigenvalues"
